@@ -466,7 +466,15 @@ impl AptosVM {
                 let module_id = entry.module().clone();
                 let func_name = entry.function();
                 let ty_args = entry.ty_args().to_vec();
-                let args: Vec<&[u8]> = entry.args().iter().map(|v| v.as_slice()).collect();
+                // If a sender was provided (or even if not), inject a signer argument in front.
+                // This is required for most Aptos entry functions which take a signer/&signer as
+                // the first parameter. When sender is None, default to ZERO address.
+                let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                let mut arg_bytes: Vec<Vec<u8>> = move_core_types::value::serialize_values(&vec![
+                    move_core_types::value::MoveValue::Signer(signer_addr),
+                ]);
+                arg_bytes.extend(entry.args().iter().cloned());
+                let args: Vec<&[u8]> = arg_bytes.iter().map(|v| v.as_slice()).collect();
 
                 session
                     .execute_function_bypass_visibility(
