@@ -407,11 +407,13 @@ impl AptosVM {
     )> {
         let (session_id, user_context) = if let Some(sender_addr) = sender {
             // Get sequence number
-            let sequence_number = match resolver.get_resource(
+            let sequence_number = match resolver.get_resource_bytes_with_metadata_and_layout(
                 &sender_addr,
                 &aptos_types::account_config::AccountResource::struct_tag(),
+                &[],
+                None,
             ) {
-                Ok(Some(resource_bytes)) => {
+                Ok((Some(resource_bytes), _)) => {
                     match bcs::from_bytes::<aptos_types::account_config::AccountResource>(&resource_bytes) {
                         Ok(account_resource) => account_resource.sequence_number(),
                         Err(_) => 0, // Default to 0 if deserialization fails
