@@ -391,19 +391,69 @@ impl AptosVM {
     pub fn environment(&self) -> AptosEnvironment {
         self.move_vm.env.clone()
     }
-
-    /// Execute a single transaction payload (EntryFunction or Script) without signature,
-    /// nonce, or gas checks. Intended for fuzzing and simulation environments.
+ 
+    /// If `sender` is provided, creates a session with transaction context that allows
+    /// Move code to access `transaction_context::sender()` and related functions.
+    /// If `sender` is None, uses void session for performance.
     pub fn execute_user_payload_no_checking(
         &self,
         resolver: &impl AptosMoveResolver,
         code_storage: &impl move_vm_runtime::CodeStorage,
         payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
     ) -> anyhow::Result<(
         aptos_types::write_set::WriteSet,
         Vec<aptos_types::contract_event::ContractEvent>,
     )> {
-        let mut session = self.new_session(resolver, SessionId::void(), None);
+        let (session_id, user_context) = if let Some(sender_addr) = sender {
+            // Get sequence number
+            let sequence_number = match resolver.get_resource(
+                &sender_addr,
+                &aptos_types::account_config::AccountResource::struct_tag(),
+            ) {
+                Ok(Some(resource_bytes)) => {
+                    match bcs::from_bytes::<aptos_types::account_config::AccountResource>(&resource_bytes) {
+                        Ok(account_resource) => account_resource.sequence_number(),
+                        Err(_) => 0, // Default to 0 if deserialization fails
+                    }
+                },
+                _ => 0,
+            };
+
+            // Create UserTransactionContext for enhanced testing
+            let user_ctx = aptos_types::transaction::user_transaction_context::UserTransactionContext::new(
+                sender_addr,                   // sender
+                vec![],                        // secondary_signers
+                sender_addr,                   // gas_payer (same as sender)
+                1_000_000,                     // max_gas_amount (1M units)
+                0,                             // gas_unit_price (0 octas)
+                self.chain_id().id(),          // chain_id
+                None,                          // entry_function_payload
+                None,                          // multisig_payload
+                None,                          // transaction_index
+            );
+
+            // Create SessionId::Txn with sender info
+            let script_hash = match payload {
+                aptos_types::transaction::TransactionPayload::Script(script) => {
+                    // For scripts, calculate the actual hash to maintain semantic correctness
+                    aptos_crypto::HashValue::sha3_256_of(script.code()).to_vec()
+                },
+                _ => vec![], // EntryFunction and others use empty hash
+            };
+            
+            let session_id = SessionId::Txn {
+                sender: sender_addr,
+                sequence_number,
+                script_hash,
+            };
+
+            (session_id, Some(user_ctx))
+        } else {
+            (SessionId::void(), None)
+        };
+
+        let mut session = self.new_session(resolver, session_id, user_context);
 
         let mut gas = UnmeteredGasMeter;
         let storage = TraversalStorage::new();
