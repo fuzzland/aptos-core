@@ -401,10 +401,10 @@ impl AptosVM {
         code_storage: &impl move_vm_runtime::CodeStorage,
         payload: &aptos_types::transaction::TransactionPayload,
         sender: Option<move_core_types::account_address::AccountAddress>,
-    ) -> anyhow::Result<(
+    ) -> Result<(
         aptos_types::write_set::WriteSet,
         Vec<aptos_types::contract_event::ContractEvent>,
-    )> {
+    ), move_core_types::vm_status::VMStatus> {
         let (session_id, user_context) = if let Some(sender_addr) = sender {
             // Get sequence number
             let sequence_number = match resolver.get_resource_bytes_with_metadata_and_layout(
@@ -486,7 +486,7 @@ impl AptosVM {
                         &mut traversal,
                         code_storage,
                     )
-                    .map_err(|e| anyhow::anyhow!("entry function execution failed: {e:?}"))?;
+                    .map_err(|e| e.into_vm_status())?;
             },
             TransactionPayload::Script(script) => {
                 let mv_args: Vec<MoveValue> =
@@ -502,14 +502,20 @@ impl AptosVM {
                             &script.code(),
                             &script.ty_args().to_vec(),
                         )
-                        .map_err(|e| anyhow::anyhow!("load_script failed: {e:?}"))?;
+                        .map_err(|e| e.into_vm_status())?;
 
                     session
                         .execute_loaded_function(function, args, &mut gas, &mut traversal, &loader)
-                        .map_err(|e| anyhow::anyhow!("script execute failed: {e:?}"))?;
+                        .map_err(|e| e.into_vm_status())?;
                 });
             },
-            _ => anyhow::bail!("Unsupported payload type for no-check execution"),
+            _ => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("Unsupported payload type for no-check execution".to_string()),
+                });
+            },
         }
 
         let change_set = session
@@ -518,13 +524,22 @@ impl AptosVM {
                     unlimited_at_gas_feature_version(0),
                 code_storage,
             )
-            .map_err(|e| anyhow::anyhow!("session finish failed: {e:?}"))?;
+            .map_err(|e| e.into_vm_status())?;
 
-        let storage_change_set = change_set
+        let storage_change_set = match change_set
             .try_combine_into_storage_change_set(
                 aptos_vm_types::module_write_set::ModuleWriteSet::empty(),
             )
-            .map_err(|e| anyhow::anyhow!("convert change set failed: {e:?}"))?;
+        {
+            Ok(cs) => cs,
+            Err(_e) => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("convert change set failed".to_string()),
+                });
+            }
+        };
 
         let write_set = storage_change_set.write_set().clone();
         let events = storage_change_set.events().to_vec();
