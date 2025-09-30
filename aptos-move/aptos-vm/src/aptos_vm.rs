@@ -391,6 +391,161 @@ impl AptosVM {
     pub fn environment(&self) -> AptosEnvironment {
         self.move_vm.env.clone()
     }
+ 
+    /// If `sender` is provided, creates a session with transaction context that allows
+    /// Move code to access `transaction_context::sender()` and related functions.
+    /// If `sender` is None, uses void session for performance.
+    pub fn execute_user_payload_no_checking(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> Result<(
+        aptos_types::write_set::WriteSet,
+        Vec<aptos_types::contract_event::ContractEvent>,
+    ), move_core_types::vm_status::VMStatus> {
+        let (session_id, user_context) = if let Some(sender_addr) = sender {
+            // Get sequence number
+            let sequence_number = match resolver.get_resource_bytes_with_metadata_and_layout(
+                &sender_addr,
+                &aptos_types::account_config::AccountResource::struct_tag(),
+                &[],
+                None,
+            ) {
+                Ok((Some(resource_bytes), _)) => {
+                    match bcs::from_bytes::<aptos_types::account_config::AccountResource>(&resource_bytes) {
+                        Ok(account_resource) => account_resource.sequence_number(),
+                        Err(_) => 0, // Default to 0 if deserialization fails
+                    }
+                },
+                _ => 0,
+            };
+
+            // Create UserTransactionContext for enhanced testing
+            let user_ctx = aptos_types::transaction::user_transaction_context::UserTransactionContext::new(
+                sender_addr,                   // sender
+                vec![],                        // secondary_signers
+                sender_addr,                   // gas_payer (same as sender)
+                1_000_000,                     // max_gas_amount (1M units)
+                0,                             // gas_unit_price (0 octas)
+                self.chain_id().id(),          // chain_id
+                None,                          // entry_function_payload
+                None,                          // multisig_payload
+                None,                          // transaction_index
+            );
+
+            // Create SessionId::Txn with sender info
+            let script_hash = match payload {
+                aptos_types::transaction::TransactionPayload::Script(script) => {
+                    // For scripts, calculate the actual hash to maintain semantic correctness
+                    aptos_crypto::HashValue::sha3_256_of(script.code()).to_vec()
+                },
+                _ => vec![], // EntryFunction and others use empty hash
+            };
+            
+            let session_id = SessionId::Txn {
+                sender: sender_addr,
+                sequence_number,
+                script_hash,
+            };
+
+            (session_id, Some(user_ctx))
+        } else {
+            (SessionId::void(), None)
+        };
+
+        let mut session = self.new_session(resolver, session_id, user_context);
+
+        let mut gas = UnmeteredGasMeter;
+        let storage = TraversalStorage::new();
+        let mut traversal = TraversalContext::new(&storage);
+
+        match payload {
+            TransactionPayload::EntryFunction(entry) => {
+                let module_id = entry.module().clone();
+                let func_name = entry.function();
+                let ty_args = entry.ty_args().to_vec();
+                // If a sender was provided (or even if not), inject a signer argument in front.
+                // This is required for most Aptos entry functions which take a signer/&signer as
+                // the first parameter. When sender is None, default to ZERO address.
+                let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                let mut arg_bytes: Vec<Vec<u8>> = move_core_types::value::serialize_values(&vec![
+                    move_core_types::value::MoveValue::Signer(signer_addr),
+                ]);
+                arg_bytes.extend(entry.args().iter().cloned());
+                let args: Vec<&[u8]> = arg_bytes.iter().map(|v| v.as_slice()).collect();
+
+                session
+                    .execute_function_bypass_visibility(
+                        &module_id,
+                        func_name,
+                        ty_args,
+                        args,
+                        &mut gas,
+                        &mut traversal,
+                        code_storage,
+                    )
+                    .map_err(|e| e.into_vm_status())?;
+            },
+            TransactionPayload::Script(script) => {
+                let mv_args: Vec<MoveValue> =
+                    script.args().iter().cloned().map(MoveValue::from).collect();
+                let args: Vec<Vec<u8>> = serialize_values(&mv_args);
+
+                move_vm_runtime::dispatch_loader!(code_storage, loader, {
+                    let function = loader
+                        .load_script(
+                            &move_vm_runtime::LegacyLoaderConfig::unmetered(),
+                            &mut gas,
+                            &mut traversal,
+                            &script.code(),
+                            &script.ty_args().to_vec(),
+                        )
+                        .map_err(|e| e.into_vm_status())?;
+
+                    session
+                        .execute_loaded_function(function, args, &mut gas, &mut traversal, &loader)
+                        .map_err(|e| e.into_vm_status())?;
+                });
+            },
+            _ => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("Unsupported payload type for no-check execution".to_string()),
+                });
+            },
+        }
+
+        let change_set = session
+            .finish(
+                &aptos_vm_types::storage::change_set_configs::ChangeSetConfigs::
+                    unlimited_at_gas_feature_version(0),
+                code_storage,
+            )
+            .map_err(|e| e.into_vm_status())?;
+
+        let storage_change_set = match change_set
+            .try_combine_into_storage_change_set(
+                aptos_vm_types::module_write_set::ModuleWriteSet::empty(),
+            )
+        {
+            Ok(cs) => cs,
+            Err(_e) => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("convert change set failed".to_string()),
+                });
+            }
+        };
+
+        let write_set = storage_change_set.write_set().clone();
+        let events = storage_change_set.events().to_vec();
+
+        Ok((write_set, events))
+    }
 
     /// Sets execution concurrency level when invoked the first time.
     pub fn set_concurrency_level_once(mut concurrency_level: usize) {
