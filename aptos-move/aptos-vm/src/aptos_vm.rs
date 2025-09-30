@@ -140,6 +140,7 @@ use move_vm_runtime::{
     InstantiatedFunctionLoader, LegacyLoaderConfig, ModuleStorage, RuntimeEnvironment,
     ScriptLoader, WithRuntimeEnvironment,
 };
+use move_vm_runtime::tracing::{begin_pc_capture, end_pc_capture_take};
 use move_vm_types::gas::{DependencyKind, GasMeter, UnmeteredGasMeter};
 use num_cpus;
 use once_cell::sync::OnceCell;
@@ -149,6 +150,7 @@ use std::{
     marker::Sync,
     sync::Arc,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static EXECUTION_CONCURRENCY_LEVEL: OnceCell<usize> = OnceCell::new();
 static NUM_EXECUTION_SHARD: OnceCell<usize> = OnceCell::new();
@@ -545,6 +547,36 @@ impl AptosVM {
         let events = storage_change_set.events().to_vec();
 
         Ok((write_set, events))
+    }
+
+    /// Execute without checks and always return (Result<(WriteSet, Events), VMStatus>, pc_index_sequence).
+    /// The index sequence contains the instruction offsets (pc) observed during execution.
+    pub fn execute_user_payload_no_checking_with_counter(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<
+            (
+                aptos_types::write_set::WriteSet,
+                Vec<aptos_types::contract_event::ContractEvent>,
+            ),
+            move_core_types::vm_status::VMStatus,
+        >,
+        Vec<u32>,
+    ) {
+        // Run the underlying no-check execution while capturing pc into thread-local buffer.
+        begin_pc_capture();
+        let result = self.execute_user_payload_no_checking(
+            resolver,
+            code_storage,
+            payload,
+            sender,
+        );
+        let pcs = end_pc_capture_take();
+        (result, pcs)
     }
 
     /// Sets execution concurrency level when invoked the first time.
