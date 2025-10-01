@@ -142,6 +142,7 @@ use move_vm_runtime::{
 };
 use move_vm_runtime::tracing::{begin_pc_capture, end_pc_capture_take};
 use move_vm_types::gas::{DependencyKind, GasMeter, UnmeteredGasMeter};
+use move_core_types::vm_status as move_vm_status;
 use num_cpus;
 use once_cell::sync::OnceCell;
 use std::{
@@ -151,12 +152,24 @@ use std::{
     sync::Arc,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 static EXECUTION_CONCURRENCY_LEVEL: OnceCell<usize> = OnceCell::new();
 static NUM_EXECUTION_SHARD: OnceCell<usize> = OnceCell::new();
 static NUM_PROOF_READING_THREADS: OnceCell<usize> = OnceCell::new();
 static DISCARD_FAILED_BLOCKS: OnceCell<bool> = OnceCell::new();
 static PROCESSED_TRANSACTIONS_DETAILED_COUNTERS: OnceCell<bool> = OnceCell::new();
+
+/// Outcome classification for fuzzing/external consumers.
+#[derive(Debug, Clone, Copy)]
+pub enum ExecOutcomeKind {
+    Ok,
+    MoveAbort(u64),
+    OutOfGas,
+    InvariantViolation,
+    OtherError,
+    Panic,
+}
 
 macro_rules! deprecated_module_bundle {
     () => {
@@ -407,6 +420,11 @@ impl AptosVM {
         aptos_types::write_set::WriteSet,
         Vec<aptos_types::contract_event::ContractEvent>,
     ), move_core_types::vm_status::VMStatus> {
+        // Guard against Rust-level panics in the VM dispatch path
+        let inner = || -> Result<(
+            aptos_types::write_set::WriteSet,
+            Vec<aptos_types::contract_event::ContractEvent>,
+        ), move_core_types::vm_status::VMStatus> {
         let (session_id, user_context) = if let Some(sender_addr) = sender {
             // Get sequence number
             let sequence_number = match resolver.get_resource_bytes_with_metadata_and_layout(
@@ -547,6 +565,14 @@ impl AptosVM {
         let events = storage_change_set.events().to_vec();
 
         Ok((write_set, events))
+        };
+        match catch_unwind(AssertUnwindSafe(inner)) {
+            Ok(res) => res,
+            Err(_) => Err(move_core_types::vm_status::VMStatus::error(
+                move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                Some("panic in execute_user_payload_no_checking".to_string()),
+            )),
+        }
     }
 
     /// Execute without checks and always return (Result<(WriteSet, Events), VMStatus>, pc_index_sequence).
@@ -566,17 +592,59 @@ impl AptosVM {
             move_core_types::vm_status::VMStatus,
         >,
         Vec<u32>,
+        ExecOutcomeKind,
     ) {
         // Run the underlying no-check execution while capturing pc into thread-local buffer.
         begin_pc_capture();
-        let result = self.execute_user_payload_no_checking(
-            resolver,
-            code_storage,
-            payload,
-            sender,
-        );
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.execute_user_payload_no_checking(
+                resolver,
+                code_storage,
+                payload,
+                sender,
+            )
+        }));
         let pcs = end_pc_capture_take();
-        (result, pcs)
+
+        match result {
+            Ok(exec_res) => {
+                let kind = match &exec_res {
+                    Ok(_) => ExecOutcomeKind::Ok,
+                    Err(vm_status) => match vm_status {
+                        move_vm_status::VMStatus::Executed => ExecOutcomeKind::Ok,
+                        move_vm_status::VMStatus::MoveAbort(_, code) => ExecOutcomeKind::MoveAbort(*code),
+                        move_vm_status::VMStatus::ExecutionFailure { status_code, .. } => {
+                            match status_code {
+                                move_vm_status::StatusCode::OUT_OF_GAS => ExecOutcomeKind::OutOfGas,
+                                _ => match status_code.status_type() {
+                                    move_vm_status::StatusType::InvariantViolation => ExecOutcomeKind::InvariantViolation,
+                                    _ => ExecOutcomeKind::OtherError,
+                                },
+                            }
+                        }
+                        move_vm_status::VMStatus::Error { status_code, .. } => match status_code {
+                            move_vm_status::StatusCode::OUT_OF_GAS => ExecOutcomeKind::OutOfGas,
+                            _ => match status_code.status_type() {
+                                move_vm_status::StatusType::InvariantViolation => ExecOutcomeKind::InvariantViolation,
+                                _ => ExecOutcomeKind::OtherError,
+                            },
+                        },
+                    },
+                };
+                (exec_res, pcs, kind)
+            }
+            Err(_) => {
+                // Rust-level panic during execution
+                (
+                    Err(move_core_types::vm_status::VMStatus::error(
+                        move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                        Some("panic in execute_user_payload_no_checking".to_string()),
+                    )),
+                    pcs,
+                    ExecOutcomeKind::Panic,
+                )
+            }
+        }
     }
 
     /// Sets execution concurrency level when invoked the first time.
