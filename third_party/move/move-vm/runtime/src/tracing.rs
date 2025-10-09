@@ -7,7 +7,7 @@ use crate::debug::DebugContext;
 use crate::{interpreter::InterpreterDebugInterface, loader::LoadedFunction, RuntimeEnvironment};
 use ::{
     move_binary_format::file_format::Bytecode,
-    move_vm_types::values::Locals,
+    move_vm_types::values::{IntegerValue, Locals},
     once_cell::sync::Lazy,
     std::{
         cell::RefCell,
@@ -46,6 +46,90 @@ pub static LOGGING_FILE_WRITER: Lazy<Mutex<std::io::BufWriter<File>>> = Lazy::ne
 thread_local! {
     static TL_PC_CAPTURE_ENABLED: RefCell<bool> = RefCell::new(false);
     static TL_PC_BUFFER: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+}
+
+// Thread-local, in-memory shift event capture support.
+thread_local! {
+    static TL_SHIFT_CAPTURE_ENABLED: RefCell<bool> = RefCell::new(false);
+    static TL_SHIFT_BUFFER: RefCell<Vec<ShiftEvent>> = RefCell::new(Vec::new());
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ShiftOp {
+    Shl,
+    Shr,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShiftEvent {
+    pub function: String,
+    pub pc: u16,
+    pub op: ShiftOp,
+    pub lhs: String,
+    pub rhs: u8,
+    pub lost_high_bits: bool,
+}
+
+/// Begin capturing shift operations for the current thread.
+pub fn begin_shift_capture() {
+    TL_SHIFT_CAPTURE_ENABLED.with(|e| *e.borrow_mut() = true);
+    TL_SHIFT_BUFFER.with(|buf| buf.borrow_mut().clear());
+}
+
+/// Stop capturing and return the captured shift events for the current thread.
+pub fn end_shift_capture_take() -> Vec<ShiftEvent> {
+    TL_SHIFT_CAPTURE_ENABLED.with(|e| *e.borrow_mut() = false);
+    TL_SHIFT_BUFFER.with(|buf| std::mem::take(&mut *buf.borrow_mut()))
+}
+
+pub(crate) fn record_shift_event(
+    function: &LoadedFunction,
+    pc: u16,
+    op: ShiftOp,
+    lhs: &IntegerValue,
+    rhs: u8,
+) {
+    TL_SHIFT_CAPTURE_ENABLED.with(|enabled| {
+        if *enabled.borrow() {
+            let event = ShiftEvent {
+                function: function.name_as_pretty_string(),
+                pc,
+                op,
+                lhs: format_integer_value(lhs),
+                rhs,
+                lost_high_bits: match op { ShiftOp::Shl => shl_loses_high_bits(lhs, rhs), ShiftOp::Shr => false },
+            };
+            TL_SHIFT_BUFFER.with(|buf| buf.borrow_mut().push(event));
+        }
+    });
+}
+
+fn format_integer_value(v: &IntegerValue) -> String {
+    match v {
+        IntegerValue::U8(x) => x.to_string(),
+        IntegerValue::U16(x) => x.to_string(),
+        IntegerValue::U32(x) => x.to_string(),
+        IntegerValue::U64(x) => x.to_string(),
+        IntegerValue::U128(x) => x.to_string(),
+        IntegerValue::U256(x) => format!("{}", x),
+    }
+}
+
+fn shl_loses_high_bits(v: &IntegerValue, n: u8) -> bool {
+    if n == 0 { return false; }
+    match v {
+        IntegerValue::U8(x) => if n < 8 { (*x >> (8 - n)) != 0 } else { false },
+        IntegerValue::U16(x) => if n < 16 { (*x >> (16 - n)) != 0 } else { false },
+        IntegerValue::U32(x) => if n < 32 { (*x >> (32 - n)) != 0 } else { false },
+        IntegerValue::U64(x) => if n < 64 { (*x >> (64 - n)) != 0 } else { false },
+        IntegerValue::U128(x) => if n < 128 { (*x >> (128 - n)) != 0 } else { false },
+        IntegerValue::U256(x) => {
+            // compare as string against zero after shifting right by (256-n)
+            let shift: u8 = (256u32.saturating_sub(n as u32)) as u8;
+            let shifted = format!("{}", *x >> shift);
+            shifted != "0"
+        },
+    }
 }
 
 /// Begin capturing program counters for the current thread.

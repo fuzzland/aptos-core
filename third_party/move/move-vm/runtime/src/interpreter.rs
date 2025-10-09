@@ -22,7 +22,9 @@ use crate::{
         loader::traits::Loader, ty_depth_checker::TypeDepthChecker,
         ty_layout_converter::LayoutConverter,
     },
-    trace, LoadedFunction, RuntimeEnvironment,
+    trace,
+    tracing::{record_shift_event, ShiftOp},
+    LoadedFunction, RuntimeEnvironment,
 };
 use fail::fail_point;
 use move_binary_format::{
@@ -2452,6 +2454,7 @@ impl Frame {
                         gas_meter.charge_simple_instr(S::Shl)?;
                         let rhs = interpreter.operand_stack.pop_as::<u8>()?;
                         let lhs = interpreter.operand_stack.pop_as::<IntegerValue>()?;
+                        record_shift_event(&self.function, self.pc, ShiftOp::Shl, &lhs, rhs);
                         interpreter
                             .operand_stack
                             .push(lhs.shl_checked(rhs)?.into_value())?;
@@ -2460,6 +2463,7 @@ impl Frame {
                         gas_meter.charge_simple_instr(S::Shr)?;
                         let rhs = interpreter.operand_stack.pop_as::<u8>()?;
                         let lhs = interpreter.operand_stack.pop_as::<IntegerValue>()?;
+                        record_shift_event(&self.function, self.pc, ShiftOp::Shr, &lhs, rhs);
                         interpreter
                             .operand_stack
                             .push(lhs.shr_checked(rhs)?.into_value())?;

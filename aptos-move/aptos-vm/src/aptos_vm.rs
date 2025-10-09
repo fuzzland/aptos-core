@@ -140,7 +140,7 @@ use move_vm_runtime::{
     InstantiatedFunctionLoader, LegacyLoaderConfig, ModuleStorage, RuntimeEnvironment,
     ScriptLoader, WithRuntimeEnvironment,
 };
-use move_vm_runtime::tracing::{begin_pc_capture, end_pc_capture_take};
+use move_vm_runtime::tracing::{begin_pc_capture, begin_shift_capture, end_pc_capture_take, end_shift_capture_take};
 use move_vm_types::gas::{DependencyKind, GasMeter, UnmeteredGasMeter};
 use move_core_types::vm_status as move_vm_status;
 use num_cpus;
@@ -416,11 +416,18 @@ impl AptosVM {
         code_storage: &impl move_vm_runtime::CodeStorage,
         payload: &aptos_types::transaction::TransactionPayload,
         sender: Option<move_core_types::account_address::AccountAddress>,
-    ) -> Result<(
-        aptos_types::write_set::WriteSet,
-        Vec<aptos_types::contract_event::ContractEvent>,
-    ), move_core_types::vm_status::VMStatus> {
+    ) -> (
+        Result<(
+            aptos_types::write_set::WriteSet,
+            Vec<aptos_types::contract_event::ContractEvent>,
+        ), move_core_types::vm_status::VMStatus>,
+        Vec<u32>,
+        Vec<move_vm_runtime::tracing::ShiftEvent>,
+        ExecOutcomeKind,
+    ) {
         // Guard against Rust-level panics in the VM dispatch path
+        begin_pc_capture();
+        begin_shift_capture();
         let inner = || -> Result<(
             aptos_types::write_set::WriteSet,
             Vec<aptos_types::contract_event::ContractEvent>,
@@ -566,49 +573,12 @@ impl AptosVM {
 
         Ok((write_set, events))
         };
-        match catch_unwind(AssertUnwindSafe(inner)) {
-            Ok(res) => res,
-            Err(_) => Err(move_core_types::vm_status::VMStatus::error(
-                move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
-                Some("panic in execute_user_payload_no_checking".to_string()),
-            )),
-        }
-    }
-
-    /// Execute without checks and always return (Result<(WriteSet, Events), VMStatus>, pc_index_sequence).
-    /// The index sequence contains the instruction offsets (pc) observed during execution.
-    pub fn execute_user_payload_no_checking_with_counter(
-        &self,
-        resolver: &impl AptosMoveResolver,
-        code_storage: &impl move_vm_runtime::CodeStorage,
-        payload: &aptos_types::transaction::TransactionPayload,
-        sender: Option<move_core_types::account_address::AccountAddress>,
-    ) -> (
-        Result<
-            (
-                aptos_types::write_set::WriteSet,
-                Vec<aptos_types::contract_event::ContractEvent>,
-            ),
-            move_core_types::vm_status::VMStatus,
-        >,
-        Vec<u32>,
-        ExecOutcomeKind,
-    ) {
-        // Run the underlying no-check execution while capturing pc into thread-local buffer.
-        begin_pc_capture();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.execute_user_payload_no_checking(
-                resolver,
-                code_storage,
-                payload,
-                sender,
-            )
-        }));
+        let result = catch_unwind(AssertUnwindSafe(inner));
         let pcs = end_pc_capture_take();
-
+        let shifts = end_shift_capture_take();
         match result {
-            Ok(exec_res) => {
-                let kind = match &exec_res {
+            Ok(res) => {
+                let kind = match &res {
                     Ok(_) => ExecOutcomeKind::Ok,
                     Err(vm_status) => match vm_status {
                         move_vm_status::VMStatus::Executed => ExecOutcomeKind::Ok,
@@ -631,20 +601,72 @@ impl AptosVM {
                         },
                     },
                 };
-                (exec_res, pcs, kind)
+                (res, pcs, shifts, kind)
             }
-            Err(_) => {
-                // Rust-level panic during execution
-                (
-                    Err(move_core_types::vm_status::VMStatus::error(
-                        move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
-                        Some("panic in execute_user_payload_no_checking".to_string()),
-                    )),
-                    pcs,
-                    ExecOutcomeKind::Panic,
-                )
-            }
+            Err(_) => (
+                Err(move_core_types::vm_status::VMStatus::error(
+                    move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    Some("panic in execute_user_payload_no_checking".to_string()),
+                )),
+                pcs,
+                shifts,
+                ExecOutcomeKind::Panic,
+            ),
         }
+    }
+
+    /// Execute without checks and always return (Result<(WriteSet, Events), VMStatus>, pc_index_sequence).
+    /// The index sequence contains the instruction offsets (pc) observed during execution.
+    pub fn execute_user_payload_no_checking_with_counter(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<
+            (
+                aptos_types::write_set::WriteSet,
+                Vec<aptos_types::contract_event::ContractEvent>,
+            ),
+            move_core_types::vm_status::VMStatus,
+        >,
+        Vec<u32>,
+        ExecOutcomeKind,
+    ) {
+        let (res, pcs, _shifts, kind) = self.execute_user_payload_no_checking(
+            resolver,
+            code_storage,
+            payload,
+            sender,
+        );
+        (res, pcs, kind)
+    }
+
+    /// Execute without checks and return shift events captured during execution.
+    pub fn execute_user_payload_no_checking_with_shift_trace(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<
+            (
+                aptos_types::write_set::WriteSet,
+                Vec<aptos_types::contract_event::ContractEvent>,
+            ),
+            move_core_types::vm_status::VMStatus,
+        >,
+        Vec<move_vm_runtime::tracing::ShiftEvent>,
+    ) {
+        let (res, _pcs, shifts, _kind) = self.execute_user_payload_no_checking(
+            resolver,
+            code_storage,
+            payload,
+            sender,
+        );
+        (res, shifts)
     }
 
     /// Sets execution concurrency level when invoked the first time.
