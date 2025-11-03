@@ -158,7 +158,29 @@ pub(crate) fn trace(
     // Always attempt to capture into thread-local buffer when enabled.
     TL_PC_CAPTURE_ENABLED.with(|enabled| {
         if *enabled.borrow() {
-            TL_PC_BUFFER.with(|buf| buf.borrow_mut().push(pc as u32));
+            // Compute a global PC index that is stable across functions by
+            // hashing module address, module name, function name, and local pc.
+            fn hash32(data: &[u8]) -> u32 {
+                let mut hash: u32 = 0x811C9DC5; // FNV-1a 32-bit offset basis
+                for &b in data {
+                    hash ^= b as u32;
+                    hash = hash.wrapping_mul(0x01000193);
+                }
+                hash
+            }
+
+            let module_id = function.module_or_script_id();
+            let func_name = function.name_id();
+
+            // Build bytes: address || module_name || function_name || pc
+            let mut bytes = Vec::with_capacity(32 + module_id.name().as_str().len() + func_name.as_str().len() + 4);
+            bytes.extend_from_slice(module_id.address().as_ref());
+            bytes.extend_from_slice(module_id.name().as_str().as_bytes());
+            bytes.extend_from_slice(func_name.as_str().as_bytes());
+            bytes.extend_from_slice(&(pc as u32).to_le_bytes());
+            let global_pc = hash32(&bytes);
+
+            TL_PC_BUFFER.with(|buf| buf.borrow_mut().push(global_pc));
         }
     });
 

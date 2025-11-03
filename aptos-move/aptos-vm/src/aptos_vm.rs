@@ -151,7 +151,6 @@ use std::{
     marker::Sync,
     sync::Arc,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 static EXECUTION_CONCURRENCY_LEVEL: OnceCell<usize> = OnceCell::new();
@@ -159,6 +158,15 @@ static NUM_EXECUTION_SHARD: OnceCell<usize> = OnceCell::new();
 static NUM_PROOF_READING_THREADS: OnceCell<usize> = OnceCell::new();
 static DISCARD_FAILED_BLOCKS: OnceCell<bool> = OnceCell::new();
 static PROCESSED_TRANSACTIONS_DETAILED_COUNTERS: OnceCell<bool> = OnceCell::new();
+
+/// Fuzzer sender address containing "FUZZER_SENDER" in ASCII
+/// 0x000000000000000000000000000000000000000046555A5A45525F53454E444552
+pub const FUZZER_SENDER: AccountAddress = AccountAddress::new([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x46, 0x55, 0x5A, 0x5A, 0x45, 0x52, // "FUZZER"
+    0x5F, 0x53, 0x45, 0x4E, 0x44, 0x45, 0x52, 0x00, // "_SENDE\0"
+]);
 
 /// Outcome classification for fuzzing/external consumers.
 #[derive(Debug, Clone, Copy)]
