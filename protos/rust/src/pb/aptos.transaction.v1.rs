@@ -587,9 +587,9 @@ pub struct WriteTableItem {
 pub struct TransactionPayload {
     #[prost(enumeration = "transaction_payload::Type", tag = "1")]
     pub r#type: i32,
-    #[prost(oneof = "transaction_payload::Payload", tags = "2, 3, 4, 5, 6")]
+    #[prost(oneof = "transaction_payload::Payload", tags = "2, 3, 5, 6, 7")]
     pub payload: ::core::option::Option<transaction_payload::Payload>,
-    #[prost(oneof = "transaction_payload::ExtraConfig", tags = "7")]
+    #[prost(oneof = "transaction_payload::ExtraConfig", tags = "8")]
     pub extra_config: ::core::option::Option<transaction_payload::ExtraConfig>,
 }
 /// Nested message and enum types in `TransactionPayload`.
@@ -650,7 +650,7 @@ pub mod transaction_payload {
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum ExtraConfig {
-        #[prost(message, tag = "7")]
+        #[prost(message, tag = "8")]
         ExtraConfigV1(super::ExtraConfigV1),
     }
 }
