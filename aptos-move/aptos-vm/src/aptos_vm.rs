@@ -539,8 +539,14 @@ impl AptosVM {
                         )
                         .map_err(|e| e.into_vm_status())?;
 
+                    // Inject a signer argument in front for composer-built scripts expecting signer parameters.
+                    let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                    let mut arg_bytes: Vec<Vec<u8>> =
+                        move_core_types::value::serialize_values(&vec![MoveValue::Signer(signer_addr)]);
+                    arg_bytes.extend(args);
+
                     session
-                        .execute_loaded_function(function, args, &mut gas, &mut traversal, &loader)
+                        .execute_loaded_function(function, arg_bytes, &mut gas, &mut traversal, &loader)
                         .map_err(|e| e.into_vm_status())?;
                 });
             },
