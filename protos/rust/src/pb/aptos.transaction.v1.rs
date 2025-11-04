@@ -587,7 +587,7 @@ pub struct WriteTableItem {
 pub struct TransactionPayload {
     #[prost(enumeration = "transaction_payload::Type", tag = "1")]
     pub r#type: i32,
-    #[prost(oneof = "transaction_payload::Payload", tags = "2, 3, 5, 6")]
+    #[prost(oneof = "transaction_payload::Payload", tags = "2, 3, 4, 5, 6")]
     pub payload: ::core::option::Option<transaction_payload::Payload>,
     #[prost(oneof = "transaction_payload::ExtraConfig", tags = "7")]
     pub extra_config: ::core::option::Option<transaction_payload::ExtraConfig>,
@@ -602,6 +602,7 @@ pub mod transaction_payload {
         ScriptPayload = 2,
         WriteSetPayload = 4,
         MultisigPayload = 5,
+        IntentPayload = 6,
     }
     impl Type {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -615,6 +616,7 @@ pub mod transaction_payload {
                 Type::ScriptPayload => "TYPE_SCRIPT_PAYLOAD",
                 Type::WriteSetPayload => "TYPE_WRITE_SET_PAYLOAD",
                 Type::MultisigPayload => "TYPE_MULTISIG_PAYLOAD",
+                Type::IntentPayload => "TYPE_INTENT_PAYLOAD",
             }
         }
 
@@ -626,6 +628,7 @@ pub mod transaction_payload {
                 "TYPE_SCRIPT_PAYLOAD" => Some(Self::ScriptPayload),
                 "TYPE_WRITE_SET_PAYLOAD" => Some(Self::WriteSetPayload),
                 "TYPE_MULTISIG_PAYLOAD" => Some(Self::MultisigPayload),
+                "TYPE_INTENT_PAYLOAD" => Some(Self::IntentPayload),
                 _ => None,
             }
         }
@@ -641,6 +644,8 @@ pub mod transaction_payload {
         WriteSetPayload(super::WriteSetPayload),
         #[prost(message, tag = "6")]
         MultisigPayload(super::MultisigPayload),
+        #[prost(message, tag = "7")]
+        IntentPayload(super::IntentPayload),
     }
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
@@ -694,6 +699,12 @@ pub struct MultisigPayload {
     pub multisig_address: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub transaction_payload: ::core::option::Option<MultisigTransactionPayload>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IntentPayload {
+    #[prost(message, repeated, tag = "1")]
+    pub intent_calls: ::prost::alloc::vec::Vec<EntryFunctionPayload>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

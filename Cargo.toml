@@ -16,6 +16,7 @@ members = [
     "aptos-move/aptos-gas-profiling",
     "aptos-move/aptos-gas-schedule",
     "aptos-move/aptos-gas-schedule-updator",
+    "aptos-move/aptos-intent",
     "aptos-move/aptos-memory-usage-tracker",
     "aptos-move/aptos-native-interface",
     "aptos-move/aptos-release-builder",
@@ -363,6 +364,7 @@ aptos-github-client = { path = "crates/aptos-github-client" }
 aptos-global-constants = { path = "config/global-constants" }
 aptos-id-generator = { path = "crates/aptos-id-generator" }
 aptos-indexer = { path = "crates/indexer" }
+aptos-intent = { path = "aptos-move/aptos-intent" }
 aptos-indexer-grpc-cache-worker = { path = "ecosystem/indexer-grpc/indexer-grpc-cache-worker" }
 aptos-indexer-grpc-data-service = { path = "ecosystem/indexer-grpc/indexer-grpc-data-service" }
 aptos-indexer-grpc-data-service-v2 = { path = "ecosystem/indexer-grpc/indexer-grpc-data-service-v2" }

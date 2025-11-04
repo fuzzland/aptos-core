@@ -5844,6 +5844,98 @@ impl<'de> serde::Deserialize<'de> for MultisigPayload {
         deserializer.deserialize_struct("aptos.transaction.v1.MultisigPayload", FIELDS, GeneratedVisitor)
     }
 }
+impl serde::Serialize for IntentPayload {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.intent_calls.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("aptos.transaction.v1.IntentPayload", len)?;
+        if !self.intent_calls.is_empty() {
+            struct_ser.serialize_field("intentCalls", &self.intent_calls)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for IntentPayload {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "intent_calls",
+            "intentCalls",
+        ];
+
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            IntentCalls,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+                    type Value = GeneratedField;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "intentCalls" | "intent_calls" => Ok(GeneratedField::IntentCalls),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = IntentPayload;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct aptos.transaction.v1.IntentPayload")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> std::result::Result<IntentPayload, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+            {
+                let mut intent_calls__ = None;
+                while let Some(k) = map.next_key()? {
+                    match k {
+                        GeneratedField::IntentCalls => {
+                            if intent_calls__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("intentCalls"));
+                            }
+                            intent_calls__ = Some(map.next_value()?);
+                        }
+                    }
+                }
+                Ok(IntentPayload {
+                    intent_calls: intent_calls__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct("aptos.transaction.v1.IntentPayload", FIELDS, GeneratedVisitor)
+    }
+}
 impl serde::Serialize for MultisigTransactionPayload {
     #[allow(deprecated)]
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -7551,6 +7643,9 @@ impl serde::Serialize for TransactionPayload {
                 transaction_payload::Payload::MultisigPayload(v) => {
                     struct_ser.serialize_field("multisigPayload", v)?;
                 }
+                transaction_payload::Payload::IntentPayload(v) => {
+                    struct_ser.serialize_field("intentPayload", v)?;
+                }
             }
         }
         if let Some(v) = self.extra_config.as_ref() {
@@ -7579,6 +7674,8 @@ impl<'de> serde::Deserialize<'de> for TransactionPayload {
             "writeSetPayload",
             "multisig_payload",
             "multisigPayload",
+            "intent_payload",
+            "intentPayload",
             "extra_config_v1",
             "extraConfigV1",
         ];
@@ -7590,6 +7687,7 @@ impl<'de> serde::Deserialize<'de> for TransactionPayload {
             ScriptPayload,
             WriteSetPayload,
             MultisigPayload,
+            IntentPayload,
             ExtraConfigV1,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -7617,6 +7715,7 @@ impl<'de> serde::Deserialize<'de> for TransactionPayload {
                             "scriptPayload" | "script_payload" => Ok(GeneratedField::ScriptPayload),
                             "writeSetPayload" | "write_set_payload" => Ok(GeneratedField::WriteSetPayload),
                             "multisigPayload" | "multisig_payload" => Ok(GeneratedField::MultisigPayload),
+                            "intentPayload" | "intent_payload" => Ok(GeneratedField::IntentPayload),
                             "extraConfigV1" | "extra_config_v1" => Ok(GeneratedField::ExtraConfigV1),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -7676,6 +7775,13 @@ impl<'de> serde::Deserialize<'de> for TransactionPayload {
                             payload__ = map.next_value::<::std::option::Option<_>>()?.map(transaction_payload::Payload::MultisigPayload)
 ;
                         }
+                        GeneratedField::IntentPayload => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("intentPayload"));
+                            }
+                            payload__ = map.next_value::<::std::option::Option<_>>()?.map(transaction_payload::Payload::IntentPayload)
+;
+                        }
                         GeneratedField::ExtraConfigV1 => {
                             if extra_config__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("extraConfigV1"));
@@ -7707,6 +7813,7 @@ impl serde::Serialize for transaction_payload::Type {
             Self::ScriptPayload => "TYPE_SCRIPT_PAYLOAD",
             Self::WriteSetPayload => "TYPE_WRITE_SET_PAYLOAD",
             Self::MultisigPayload => "TYPE_MULTISIG_PAYLOAD",
+            Self::IntentPayload => "TYPE_INTENT_PAYLOAD",
         };
         serializer.serialize_str(variant)
     }
@@ -7723,6 +7830,7 @@ impl<'de> serde::Deserialize<'de> for transaction_payload::Type {
             "TYPE_SCRIPT_PAYLOAD",
             "TYPE_WRITE_SET_PAYLOAD",
             "TYPE_MULTISIG_PAYLOAD",
+            "TYPE_INTENT_PAYLOAD",
         ];
 
         struct GeneratedVisitor;
@@ -7770,6 +7878,7 @@ impl<'de> serde::Deserialize<'de> for transaction_payload::Type {
                     "TYPE_SCRIPT_PAYLOAD" => Ok(transaction_payload::Type::ScriptPayload),
                     "TYPE_WRITE_SET_PAYLOAD" => Ok(transaction_payload::Type::WriteSetPayload),
                     "TYPE_MULTISIG_PAYLOAD" => Ok(transaction_payload::Type::MultisigPayload),
+                    "TYPE_INTENT_PAYLOAD" => Ok(transaction_payload::Type::IntentPayload),
                     _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
                 }
             }

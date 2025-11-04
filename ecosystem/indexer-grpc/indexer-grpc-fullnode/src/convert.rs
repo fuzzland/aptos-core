@@ -205,6 +205,26 @@ pub fn convert_transaction_payload(
                 ),
             ),
         },
+        TransactionPayload::IntentPayload(intent_calls) => transaction::TransactionPayload {
+            r#type: transaction::transaction_payload::Type::IntentPayload as i32,
+            payload: Some(transaction::transaction_payload::Payload::IntentPayload(
+                transaction::IntentPayload {
+                    intent_calls: intent_calls
+                        .intent_calls
+                        .iter()
+                        .map(|call| convert_entry_function_payload(call))
+                        .collect(),
+                },
+            )),
+            extra_config: Some(
+                transaction::transaction_payload::ExtraConfig::ExtraConfigV1(
+                    transaction::ExtraConfigV1 {
+                        multisig_address: None,
+                        replay_protection_nonce: nonce,
+                    },
+                ),
+            ),
+        },
 
         // Deprecated.
         TransactionPayload::ModuleBundlePayload(_) => {
