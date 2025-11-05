@@ -429,7 +429,7 @@ impl AptosVM {
             aptos_types::write_set::WriteSet,
             Vec<aptos_types::contract_event::ContractEvent>,
         ), move_core_types::vm_status::VMStatus>,
-        Vec<u32>,
+        Vec<u64>,
         Vec<move_vm_runtime::tracing::ShiftEvent>,
         ExecOutcomeKind,
     ) {
@@ -521,12 +521,13 @@ impl AptosVM {
                         &mut traversal,
                         code_storage,
                     )
-                    .map_err(|e| e.into_vm_status())?;
+                    .map_err(|e| e.clone().into_vm_status())?;
             },
             TransactionPayload::Script(script) => {
-                let mv_args: Vec<MoveValue> =
-                    script.args().iter().cloned().map(MoveValue::from).collect();
-                let args: Vec<Vec<u8>> = serialize_values(&mv_args);
+                // For scripts, combine session signers with concrete value arguments
+                // using the standard transaction-arg validation path.
+                let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                let serialized_signers = SerializedSigners::new(vec![serialized_signer(&signer_addr)], None);
 
                 move_vm_runtime::dispatch_loader!(code_storage, loader, {
                     let function = loader
@@ -537,17 +538,24 @@ impl AptosVM {
                             &script.code(),
                             &script.ty_args().to_vec(),
                         )
-                        .map_err(|e| e.into_vm_status())?;
+                        .map_err(|e| e.clone().into_vm_status())?;
 
-                    // Inject a signer argument in front for composer-built scripts expecting signer parameters.
-                    let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
-                    let mut arg_bytes: Vec<Vec<u8>> =
-                        move_core_types::value::serialize_values(&vec![MoveValue::Signer(signer_addr)]);
-                    arg_bytes.extend(args);
+                    let session_ref = &mut session;
+                    let serialized_signers_ref = &serialized_signers;
+                    let args = dispatch_transaction_arg_validation!(
+                        session_ref,
+                        &loader,
+                        &mut gas,
+                        &mut traversal,
+                        serialized_signers_ref,
+                        convert_txn_args(script.args()),
+                        &function,
+                        self.features().is_enabled(FeatureFlag::STRUCT_CONSTRUCTORS),
+                    )?;
 
                     session
-                        .execute_loaded_function(function, arg_bytes, &mut gas, &mut traversal, &loader)
-                        .map_err(|e| e.into_vm_status())?;
+                        .execute_loaded_function(function, args, &mut gas, &mut traversal, &loader)
+                        .map_err(|e| e.clone().into_vm_status())?;
                 });
             },
             _ => {
@@ -645,7 +653,7 @@ impl AptosVM {
             ),
             move_core_types::vm_status::VMStatus,
         >,
-        Vec<u32>,
+        Vec<u64>,
         ExecOutcomeKind,
     ) {
         let (res, pcs, _shifts, kind) = self.execute_user_payload_no_checking(

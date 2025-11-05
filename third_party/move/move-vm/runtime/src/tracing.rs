@@ -45,7 +45,8 @@ pub static LOGGING_FILE_WRITER: Lazy<Mutex<std::io::BufWriter<File>>> = Lazy::ne
 // Thread-local, in-memory pc capture support.
 thread_local! {
     static TL_PC_CAPTURE_ENABLED: RefCell<bool> = RefCell::new(false);
-    static TL_PC_BUFFER: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+    // Packed PCs per step: upper 32 bits = function hash, lower 32 bits = local pc (u16 widened)
+    static TL_PC_BUFFER: RefCell<Vec<u64>> = RefCell::new(Vec::new());
 }
 
 // Thread-local, in-memory shift event capture support.
@@ -139,7 +140,7 @@ pub fn begin_pc_capture() {
 }
 
 /// Stop capturing and return the captured program counters for the current thread.
-pub fn end_pc_capture_take() -> Vec<u32> {
+pub fn end_pc_capture_take() -> Vec<u64> {
     TL_PC_CAPTURE_ENABLED.with(|e| *e.borrow_mut() = false);
     TL_PC_BUFFER.with(|buf| std::mem::take(&mut *buf.borrow_mut()))
 }
@@ -158,8 +159,7 @@ pub(crate) fn trace(
     // Always attempt to capture into thread-local buffer when enabled.
     TL_PC_CAPTURE_ENABLED.with(|enabled| {
         if *enabled.borrow() {
-            // Compute a global PC index that is stable across functions by
-            // hashing module address, module name, function name, and local pc.
+            // Compute a stable function hash (FNV-1a 32-bit) from module address, module name, and function name.
             fn hash32(data: &[u8]) -> u32 {
                 let mut hash: u32 = 0x811C9DC5; // FNV-1a 32-bit offset basis
                 for &b in data {
@@ -172,15 +172,16 @@ pub(crate) fn trace(
             let module_id = function.module_or_script_id();
             let func_name = function.name_id();
 
-            // Build bytes: address || module_name || function_name || pc
-            let mut bytes = Vec::with_capacity(32 + module_id.name().as_str().len() + func_name.as_str().len() + 4);
+            // address || module_name || function_name
+            let mut bytes = Vec::with_capacity(32 + module_id.name().as_str().len() + func_name.as_str().len());
             bytes.extend_from_slice(module_id.address().as_ref());
             bytes.extend_from_slice(module_id.name().as_str().as_bytes());
             bytes.extend_from_slice(func_name.as_str().as_bytes());
-            bytes.extend_from_slice(&(pc as u32).to_le_bytes());
-            let global_pc = hash32(&bytes);
+            let function_hash = hash32(&bytes);
 
-            TL_PC_BUFFER.with(|buf| buf.borrow_mut().push(global_pc));
+            // Pack into u64: upper 32 bits = function_hash, lower 32 bits = local pc (u16 widened)
+            let packed = ((function_hash as u64) << 32) | (pc as u32 as u64);
+            TL_PC_BUFFER.with(|buf| buf.borrow_mut().push(packed));
         }
     });
 
