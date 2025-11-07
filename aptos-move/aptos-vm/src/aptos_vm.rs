@@ -140,7 +140,9 @@ use move_vm_runtime::{
     InstantiatedFunctionLoader, LegacyLoaderConfig, ModuleStorage, RuntimeEnvironment,
     ScriptLoader, WithRuntimeEnvironment,
 };
+use move_vm_runtime::tracing::{begin_pc_capture, begin_shift_capture, end_pc_capture_take, end_shift_capture_take};
 use move_vm_types::gas::{DependencyKind, GasMeter, UnmeteredGasMeter};
+use move_core_types::vm_status as move_vm_status;
 use num_cpus;
 use once_cell::sync::OnceCell;
 use std::{
@@ -149,12 +151,33 @@ use std::{
     marker::Sync,
     sync::Arc,
 };
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 static EXECUTION_CONCURRENCY_LEVEL: OnceCell<usize> = OnceCell::new();
 static NUM_EXECUTION_SHARD: OnceCell<usize> = OnceCell::new();
 static NUM_PROOF_READING_THREADS: OnceCell<usize> = OnceCell::new();
 static DISCARD_FAILED_BLOCKS: OnceCell<bool> = OnceCell::new();
 static PROCESSED_TRANSACTIONS_DETAILED_COUNTERS: OnceCell<bool> = OnceCell::new();
+
+/// Fuzzer sender address containing "FUZZER_SENDER" in ASCII
+/// 0x000000000000000000000000000000000000000046555A5A45525F53454E444552
+pub const FUZZER_SENDER: AccountAddress = AccountAddress::new([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x46, 0x55, 0x5A, 0x5A, 0x45, 0x52, // "FUZZER"
+    0x5F, 0x53, 0x45, 0x4E, 0x44, 0x45, 0x52, 0x00, // "_SENDE\0"
+]);
+
+/// Outcome classification for fuzzing/external consumers.
+#[derive(Debug, Clone, Copy)]
+pub enum ExecOutcomeKind {
+    Ok,
+    MoveAbort(u64),
+    OutOfGas,
+    InvariantViolation,
+    OtherError,
+    Panic,
+}
 
 macro_rules! deprecated_module_bundle {
     () => {
@@ -390,6 +413,282 @@ impl AptosVM {
     #[inline(always)]
     pub fn environment(&self) -> AptosEnvironment {
         self.move_vm.env.clone()
+    }
+ 
+    /// If `sender` is provided, creates a session with transaction context that allows
+    /// Move code to access `transaction_context::sender()` and related functions.
+    /// If `sender` is None, uses void session for performance.
+    pub fn execute_user_payload_no_checking(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<(
+            aptos_types::write_set::WriteSet,
+            Vec<aptos_types::contract_event::ContractEvent>,
+        ), move_core_types::vm_status::VMStatus>,
+        Vec<u64>,
+        Vec<move_vm_runtime::tracing::ShiftEvent>,
+        ExecOutcomeKind,
+    ) {
+        // Guard against Rust-level panics in the VM dispatch path
+        begin_pc_capture();
+        begin_shift_capture();
+        let inner = || -> Result<(
+            aptos_types::write_set::WriteSet,
+            Vec<aptos_types::contract_event::ContractEvent>,
+        ), move_core_types::vm_status::VMStatus> {
+        let (session_id, user_context) = if let Some(sender_addr) = sender {
+            // Get sequence number
+            let sequence_number = match resolver.get_resource_bytes_with_metadata_and_layout(
+                &sender_addr,
+                &aptos_types::account_config::AccountResource::struct_tag(),
+                &[],
+                None,
+            ) {
+                Ok((Some(resource_bytes), _)) => {
+                    match bcs::from_bytes::<aptos_types::account_config::AccountResource>(&resource_bytes) {
+                        Ok(account_resource) => account_resource.sequence_number(),
+                        Err(_) => 0, // Default to 0 if deserialization fails
+                    }
+                },
+                _ => 0,
+            };
+
+            // Create UserTransactionContext for enhanced testing
+            let user_ctx = aptos_types::transaction::user_transaction_context::UserTransactionContext::new(
+                sender_addr,                   // sender
+                vec![],                        // secondary_signers
+                sender_addr,                   // gas_payer (same as sender)
+                1_000_000,                     // max_gas_amount (1M units)
+                0,                             // gas_unit_price (0 octas)
+                self.chain_id().id(),          // chain_id
+                None,                          // entry_function_payload
+                None,                          // multisig_payload
+                None,                          // transaction_index
+            );
+
+            // Create SessionId::Txn with sender info
+            let script_hash = match payload {
+                aptos_types::transaction::TransactionPayload::Script(script) => {
+                    // For scripts, calculate the actual hash to maintain semantic correctness
+                    aptos_crypto::HashValue::sha3_256_of(script.code()).to_vec()
+                },
+                _ => vec![], // EntryFunction and others use empty hash
+            };
+            
+            let session_id = SessionId::Txn {
+                sender: sender_addr,
+                sequence_number,
+                script_hash,
+            };
+
+            (session_id, Some(user_ctx))
+        } else {
+            (SessionId::void(), None)
+        };
+
+        let mut session = self.new_session(resolver, session_id, user_context);
+
+        let mut gas = UnmeteredGasMeter;
+        let storage = TraversalStorage::new();
+        let mut traversal = TraversalContext::new(&storage);
+
+        match payload {
+            TransactionPayload::EntryFunction(entry) => {
+                let module_id = entry.module().clone();
+                let func_name = entry.function();
+                let ty_args = entry.ty_args().to_vec();
+                // If a sender was provided (or even if not), inject a signer argument in front.
+                // This is required for most Aptos entry functions which take a signer/&signer as
+                // the first parameter. When sender is None, default to ZERO address.
+                let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                let mut arg_bytes: Vec<Vec<u8>> = move_core_types::value::serialize_values(&vec![
+                    move_core_types::value::MoveValue::Signer(signer_addr),
+                ]);
+                arg_bytes.extend(entry.args().iter().cloned());
+                let args: Vec<&[u8]> = arg_bytes.iter().map(|v| v.as_slice()).collect();
+
+                session
+                    .execute_function_bypass_visibility(
+                        &module_id,
+                        func_name,
+                        ty_args,
+                        args,
+                        &mut gas,
+                        &mut traversal,
+                        code_storage,
+                    )
+                    .map_err(|e| e.clone().into_vm_status())?;
+            },
+            TransactionPayload::Script(script) => {
+                // For scripts, combine session signers with concrete value arguments
+                // using the standard transaction-arg validation path.
+                let signer_addr = sender.unwrap_or(move_core_types::account_address::AccountAddress::ZERO);
+                let serialized_signers = SerializedSigners::new(vec![serialized_signer(&signer_addr)], None);
+
+                move_vm_runtime::dispatch_loader!(code_storage, loader, {
+                    let function = loader
+                        .load_script(
+                            &move_vm_runtime::LegacyLoaderConfig::unmetered(),
+                            &mut gas,
+                            &mut traversal,
+                            &script.code(),
+                            &script.ty_args().to_vec(),
+                        )
+                        .map_err(|e| e.clone().into_vm_status())?;
+
+                    let session_ref = &mut session;
+                    let serialized_signers_ref = &serialized_signers;
+                    let args = dispatch_transaction_arg_validation!(
+                        session_ref,
+                        &loader,
+                        &mut gas,
+                        &mut traversal,
+                        serialized_signers_ref,
+                        convert_txn_args(script.args()),
+                        &function,
+                        self.features().is_enabled(FeatureFlag::STRUCT_CONSTRUCTORS),
+                    )?;
+
+                    session
+                        .execute_loaded_function(function, args, &mut gas, &mut traversal, &loader)
+                        .map_err(|e| e.clone().into_vm_status())?;
+                });
+            },
+            _ => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("Unsupported payload type for no-check execution".to_string()),
+                });
+            },
+        }
+
+        let change_set = session
+            .finish(
+                &aptos_vm_types::storage::change_set_configs::ChangeSetConfigs::
+                    unlimited_at_gas_feature_version(0),
+                code_storage,
+            )
+            .map_err(|e| e.into_vm_status())?;
+
+        let storage_change_set = match change_set
+            .try_combine_into_storage_change_set(
+                aptos_vm_types::module_write_set::ModuleWriteSet::empty(),
+            )
+        {
+            Ok(cs) => cs,
+            Err(_e) => {
+                return Err(move_core_types::vm_status::VMStatus::Error {
+                    status_code: move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    sub_status: None,
+                    message: Some("convert change set failed".to_string()),
+                });
+            }
+        };
+
+        let write_set = storage_change_set.write_set().clone();
+        let events = storage_change_set.events().to_vec();
+
+        Ok((write_set, events))
+        };
+        let result = catch_unwind(AssertUnwindSafe(inner));
+        let pcs = end_pc_capture_take();
+        let shifts = end_shift_capture_take();
+        match result {
+            Ok(res) => {
+                let kind = match &res {
+                    Ok(_) => ExecOutcomeKind::Ok,
+                    Err(vm_status) => match vm_status {
+                        move_vm_status::VMStatus::Executed => ExecOutcomeKind::Ok,
+                        move_vm_status::VMStatus::MoveAbort(_, code) => ExecOutcomeKind::MoveAbort(*code),
+                        move_vm_status::VMStatus::ExecutionFailure { status_code, .. } => {
+                            match status_code {
+                                move_vm_status::StatusCode::OUT_OF_GAS => ExecOutcomeKind::OutOfGas,
+                                _ => match status_code.status_type() {
+                                    move_vm_status::StatusType::InvariantViolation => ExecOutcomeKind::InvariantViolation,
+                                    _ => ExecOutcomeKind::OtherError,
+                                },
+                            }
+                        }
+                        move_vm_status::VMStatus::Error { status_code, .. } => match status_code {
+                            move_vm_status::StatusCode::OUT_OF_GAS => ExecOutcomeKind::OutOfGas,
+                            _ => match status_code.status_type() {
+                                move_vm_status::StatusType::InvariantViolation => ExecOutcomeKind::InvariantViolation,
+                                _ => ExecOutcomeKind::OtherError,
+                            },
+                        },
+                    },
+                };
+                (res, pcs, shifts, kind)
+            }
+            Err(_) => (
+                Err(move_core_types::vm_status::VMStatus::error(
+                    move_core_types::vm_status::StatusCode::UNKNOWN_STATUS,
+                    Some("panic in execute_user_payload_no_checking".to_string()),
+                )),
+                pcs,
+                shifts,
+                ExecOutcomeKind::Panic,
+            ),
+        }
+    }
+
+    /// Execute without checks and always return (Result<(WriteSet, Events), VMStatus>, pc_index_sequence).
+    /// The index sequence contains the instruction offsets (pc) observed during execution.
+    pub fn execute_user_payload_no_checking_with_counter(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<
+            (
+                aptos_types::write_set::WriteSet,
+                Vec<aptos_types::contract_event::ContractEvent>,
+            ),
+            move_core_types::vm_status::VMStatus,
+        >,
+        Vec<u64>,
+        ExecOutcomeKind,
+    ) {
+        let (res, pcs, _shifts, kind) = self.execute_user_payload_no_checking(
+            resolver,
+            code_storage,
+            payload,
+            sender,
+        );
+        (res, pcs, kind)
+    }
+
+    /// Execute without checks and return shift events captured during execution.
+    pub fn execute_user_payload_no_checking_with_shift_trace(
+        &self,
+        resolver: &impl AptosMoveResolver,
+        code_storage: &impl move_vm_runtime::CodeStorage,
+        payload: &aptos_types::transaction::TransactionPayload,
+        sender: Option<move_core_types::account_address::AccountAddress>,
+    ) -> (
+        Result<
+            (
+                aptos_types::write_set::WriteSet,
+                Vec<aptos_types::contract_event::ContractEvent>,
+            ),
+            move_core_types::vm_status::VMStatus,
+        >,
+        Vec<move_vm_runtime::tracing::ShiftEvent>,
+    ) {
+        let (res, _pcs, shifts, _kind) = self.execute_user_payload_no_checking(
+            resolver,
+            code_storage,
+            payload,
+            sender,
+        );
+        (res, shifts)
     }
 
     /// Sets execution concurrency level when invoked the first time.

@@ -20,7 +20,7 @@ use move_core_types::{
 };
 use move_resource_viewer::MoveValueAnnotator;
 pub use move_resource_viewer::{
-    AnnotatedMoveClosure, AnnotatedMoveStruct, AnnotatedMoveValue, RawMoveStruct,
+    AnnotatedMoveClosure, AnnotatedMoveStruct, AnnotatedMoveValue, FunctionAnnotator, RawMoveStruct,
 };
 use std::sync::Arc;
 
@@ -101,6 +101,15 @@ impl<'a, S: StateView> AptosValueAnnotator<'a, S> {
         ty_args: &[TypeTag],
     ) -> anyhow::Result<Vec<AnnotatedMoveValue>> {
         self.0.view_script_arguments(script_bytes, args, ty_args)
+    }
+
+    pub fn function_arguments_viewer(
+        &self,
+        module: &ModuleId,
+        function: &IdentStr,
+        ty_args: &[TypeTag],
+    ) -> anyhow::Result<FunctionAnnotator<ModuleView<'a, S>>> {
+        self.0.function_arguments_viewer(module, function, ty_args)
     }
 
     pub fn view_fully_decorated_ty_layout(
